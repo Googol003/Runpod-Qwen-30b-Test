@@ -65,7 +65,16 @@ Ausgabe:
 |--------|--------|
 | `transcription_result.json` | Chunks + flache `utterances` |
 | `transcription_result.xlsx` | Sheet `utterances` + `summary` |
-| `transcription_result.srt` | Untertitel mit Speaker + boundary |
+| `transcription_result.srt` | Untertitel; bei Wechsel: `[[ SPRECHERWECHSEL → S2 ]]` |
+| `transcription_dialogue.txt` | Lesbares Dialog-Protokoll mit `=== SPRECHERWECHSEL ===` pro Satz |
+
+### Sprecher & Wechsel (pro Satz)
+
+- **`speaker`**: S1, S2, … (vom Modell geschätzt, **kein** pyannote)
+- **`speaker_change`**: `true`/`false` — ob dieser Satz mit neuer Stimme beginnt
+- **`speaker_change_mark`**: z. B. `SPRECHERWECHSEL (S1 → S2)` in Excel
+
+**Ehrlich:** Omni trennt Stimmen nur so gut wie das Modell sie im Audio unterscheidet; bei viel Überlappung oft ungenau.
 
 ### Spalten (Excel)
 

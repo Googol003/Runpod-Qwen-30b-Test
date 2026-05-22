@@ -147,9 +147,10 @@ def run(
             chunk_results=chunk_results,
             raw_responses=raw_responses,
         )
-        print(f"      JSON:  {paths['json']}")
-        print(f"      Excel: {paths['xlsx']}")
-        print(f"      SRT:   {paths['srt']}")
+        print(f"      JSON:     {paths['json']}")
+        print(f"      Excel:    {paths['xlsx']}")
+        print(f"      SRT:      {paths['srt']}")
+        print(f"      Dialog:   {paths['dialogue']}")
         return 0
     except OmniModelError as e:
         print(f"Modell-Fehler: {e}", file=sys.stderr)

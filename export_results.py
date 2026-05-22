@@ -6,12 +6,14 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
+from speaker_markers import annotate_speaker_changes, format_dialogue_txt
+
 
 def _sec_to_tc(sec: float) -> str:
-  h = int(sec // 3600)
-  m = int((sec % 3600) // 60)
-  s = sec % 60
-  return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
+    h = int(sec // 3600)
+    m = int((sec % 3600) // 60)
+    s = sec % 60
+    return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
 def flatten_utterances(
@@ -46,6 +48,7 @@ def flatten_utterances(
                     "end_tc": _sec_to_tc(g_end),
                     "text": text,
                     "speaker": str(u.get("speaker", "")),
+                    "speaker_change_at_start": u.get("speaker_change_at_start"),
                     "boundary_after": str(u.get("boundary_after", "unknown")),
                     "chunk_index": int(cr.get("chunk_index", 0)),
                     "overlap_speech": overlap,
@@ -53,7 +56,7 @@ def flatten_utterances(
                     "chunk_notes": notes,
                 }
             )
-    return rows
+    return annotate_speaker_changes(rows)
 
 
 def write_outputs(
@@ -73,6 +76,11 @@ def write_outputs(
         "timecode_note": (
             "Zeitstempel stammen aus Chunk-Offsets plus vom Modell geschätzte "
             "relative Zeiten im Clip — nicht wie Whisper word-level."
+        ),
+        "speaker_note": (
+            "Sprecher S1/S2/… und speaker_change kommen vom Modell (geschätzt), "
+            "nicht von professioneller Diarisierung. Spalte speaker_change_mark "
+            "pro Satz bei erkanntem Wechsel."
         ),
         "chunks": chunk_results,
         "utterances": rows,
@@ -118,12 +126,23 @@ def write_outputs(
         lines.append(str(i))
         lines.append(f"{_srt_tc(r['start_sec'])} --> {_srt_tc(r['end_sec'])}")
         sp = r.get("speaker") or "?"
-        bnd = r.get("boundary_after") or "unknown"
-        lines.append(f"[{sp}|{bnd}] {r['text']}")
+        if r.get("speaker_change"):
+            prefix = f"[[ SPRECHERWECHSEL → {sp} ]] "
+        else:
+            prefix = f"[{sp}] "
+        lines.append(prefix + str(r["text"]))
         lines.append("")
     srt_path.write_text("\n".join(lines), encoding="utf-8")
 
-    return {"json": json_path, "xlsx": xlsx_path, "srt": srt_path}
+    dialogue_path = out_dir / "transcription_dialogue.txt"
+    dialogue_path.write_text(format_dialogue_txt(rows), encoding="utf-8")
+
+    return {
+        "json": json_path,
+        "xlsx": xlsx_path,
+        "srt": srt_path,
+        "dialogue": dialogue_path,
+    }
 
 
 def _srt_tc(sec: float) -> str:

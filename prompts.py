@@ -5,10 +5,11 @@ Du hörst einen Ausschnitt einer Audiodatei und lieferst **nur** ein gültiges J
 
 Wichtig:
 - Transkribiere gesprochene Sprache so wörtlich wie möglich (Deutsch, sofern gesprochen).
+- **Eine Äußerung = ein Satz** (oder ein kurzer Turn). Nicht mehrere Sätze in einem Block.
+- **Sprecher trennen:** weise jeder Äußerung ein Label ``speaker`` zu (S1, S2, S3, …). Wechsel die Nummer, wenn eine **andere Stimme** spricht.
 - **Zeitangaben** beziehen sich auf den **aktuellen Audio-Ausschnitt** (0 = Beginn dieses Clips).
-- Das Modell liefert **keine** garantierten Wort-für-Wort-Zeitstempel wie Whisper; schätze Start/Ende pro Äußerung so gut wie möglich.
 - Kennzeichne **überlappendes / durcheinander** gesprochenes Audio ehrlich.
-- Bei Dialog: pro Äußerung angeben, ob danach vermutlich **derselbe Sprecher** weiterspricht oder ein **Sprecherwechsel** kommt.
+- Du bist **kein** pyannote/Whisper-Diarizer — markiere Wechsel nur, wenn du die Stimme im Audio wirklich unterscheiden kannst; sonst ``unknown``.
 """
 
 USER_PROMPT_TEMPLATE = """Analysiere diesen Audio-Ausschnitt.
@@ -34,6 +35,7 @@ Antworte **ausschließlich** mit diesem JSON-Schema:
       "end_sec": 0.0,
       "text": "transkribierter Satz",
       "speaker": "S1",
+      "speaker_change_at_start": false,
       "boundary_after": "same_speaker|speaker_change|unknown"
     }}
   ]
@@ -42,7 +44,9 @@ Antworte **ausschließlich** mit diesem JSON-Schema:
 Regeln für ``utterances``:
 - Leere Liste nur wenn im Clip wirklich keine Sprache hörbar ist.
 - ``start_sec`` / ``end_sec`` innerhalb [0, {chunk_duration_sec:.2f}].
-- ``speaker``: stabile Labels S1, S2, … innerhalb des Clips (wechseln bei neuen Stimmen).
-- ``boundary_after`` beschreibt die **Übergang** nach dieser Äußerung zum nächsten Segment.
+- ``speaker``: stabile Labels S1, S2, … — **gleiche Person = gleiches Label** über den ganzen Clip.
+- ``speaker_change_at_start``: **true**, wenn **diese** Äußerung mit einer **anderen Stimme** beginnt als die **vorherige** Äußerung; bei der **ersten** Äußerung im Clip immer **false**.
+- ``boundary_after``: **speaker_change**, wenn die **nächste** Äußerung vermutlich von einem **anderen** Sprecher ist; sonst **same_speaker**; bei Unsicherheit **unknown**.
+- Wenn zwei Stimmen gleichzeitig: trotzdem getrennte Zeilen, ``overlap_speech`` = heavy.
 - Bei starkem Durcheinander: ``overlap_speech`` = ``heavy`` und ``hard_to_understand`` = true.
 """
