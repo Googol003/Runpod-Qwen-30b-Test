@@ -314,8 +314,8 @@ def main() -> None:
     ap.add_argument(
         "--audio",
         "-a",
-        required=True,
-        help="Pfad zur Audio-Datei (wav, mp3, m4a, …)",
+        default=None,
+        help="Pfad zur Audio-Datei (wav, mp3, m4a, …); bei --check nicht nötig",
     )
     ap.add_argument(
         "--output-dir",
@@ -372,6 +372,8 @@ def main() -> None:
         else:
             print("\nTipp: --check-load lädt das Modell und prüft 4-bit / GPU-Offload.")
         raise SystemExit(0)
+    if not args.audio:
+        ap.error("--audio/-a ist erforderlich (außer mit --check).")
     if args.max_new_tokens is not None:
         os.environ["OMNI_MAX_NEW_TOKENS"] = str(args.max_new_tokens)
     raise SystemExit(
