@@ -1,17 +1,15 @@
-# Qwen-Omni auf RunPod (GPU). Siehe README für transformers-Version.
-torch>=2.1.0
-accelerate>=0.30.0
-transformers>=4.51.0
-qwen-omni-utils>=0.0.8
-soundfile>=0.12.0
+# Standard: Whisper + Ollama (wie runpod_excel_corrector)
 pandas>=2.2.0
 openpyxl>=3.1.2
+requests>=2.32.0
 python-dotenv>=1.0.0
 psutil>=5.9.0
 tqdm>=4.66.0
+faster-whisper>=1.1.0
 
-# Für 30B auf 32 GB GPU ohne CPU-Offload:
-# bitsandbytes>=0.43.0
-
-# Optional, stark empfohlen auf RunPod (weniger VRAM):
-# pip install -U flash-attn --no-build-isolation
+# Nur für TRANSCRIBE_BACKEND=hf (Qwen-Omni via transformers):
+# torch>=2.1.0
+# accelerate>=0.30.0
+# transformers>=4.51.0
+# qwen-omni-utils>=0.0.8
+# soundfile>=0.12.0
