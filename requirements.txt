@@ -10,5 +10,8 @@ python-dotenv>=1.0.0
 psutil>=5.9.0
 tqdm>=4.66.0
 
-# Optional, stark empfohlen auf RunPod (weniger VRAM):
+# Für 30B auf 32 GB GPU (OMNI_LOAD_IN_4BIT=1):
+bitsandbytes>=0.43.0
+
+# Optional (weniger VRAM, wenn installiert):
 # pip install -U flash-attn --no-build-isolation

@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# RunPod: Whisper-Chunks + Ollama (wie runpod_excel_corrector)
+# RunPod: HF Qwen-Omni + optional 4-bit
 #
 # Usage:
 #   bash runpod_ready.sh "/workspace/TestAudio.mp3"
-#
-# Optional:
-#   LLM_MODEL=gemma4:26b WHISPER_MODEL=large-v3 bash runpod_ready.sh audio.mp3
 
 AUDIO="${1:-}"
 if [[ -z "${AUDIO}" ]]; then
@@ -55,31 +52,20 @@ if [[ "${NEW_HASH}" != "${OLD_HASH}" ]]; then
   echo "${NEW_HASH}" > "${REQ_HASH_FILE}"
 fi
 
-export TRANSCRIBE_BACKEND="${TRANSCRIBE_BACKEND:-ollama}"
-export LLM_PROVIDER="${LLM_PROVIDER:-ollama}"
-export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-export LLM_MODEL="${LLM_MODEL:-gemma4:26b}"
-export WHISPER_MODEL="${WHISPER_MODEL:-large-v3}"
-export WHISPER_DEVICE="${WHISPER_DEVICE:-cuda}"
+[[ -f .env ]] && set -a && source .env && set +a
+
+export OMNI_MODEL_ID="${OMNI_MODEL_ID:-/workspace/models/Qwen3-Omni-30B-A3B-Instruct}"
+export OMNI_LOAD_IN_4BIT="${OMNI_LOAD_IN_4BIT:-1}"
+export OMNI_NO_CPU_OFFLOAD="${OMNI_NO_CPU_OFFLOAD:-1}"
+export OMNI_FLASH_ATTN="${OMNI_FLASH_ATTN:-0}"
 export OMNI_CHUNK_SEC="${OMNI_CHUNK_SEC:-30}"
 export OMNI_OVERLAP_SEC="${OMNI_OVERLAP_SEC:-2}"
 
-log "TRANSCRIBE_BACKEND=${TRANSCRIBE_BACKEND}"
-log "LLM_MODEL=${LLM_MODEL} OLLAMA_BASE_URL=${OLLAMA_BASE_URL}"
-log "WHISPER_MODEL=${WHISPER_MODEL}"
+log "OMNI_MODEL_ID=${OMNI_MODEL_ID}"
+log "OMNI_LOAD_IN_4BIT=${OMNI_LOAD_IN_4BIT} OMNI_NO_CPU_OFFLOAD=${OMNI_NO_CPU_OFFLOAD}"
 
-if ! curl -fsS --max-time 15 "${OLLAMA_BASE_URL}/api/tags" >/dev/null; then
-  log "ERROR: Ollama nicht erreichbar unter ${OLLAMA_BASE_URL}"
-  log "Start: ollama serve"
-  exit 3
-fi
-
-if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "${LLM_MODEL}"; then
-  log "Ollama-Modell vorhanden: ${LLM_MODEL}"
-else
-  log "Pull: ${LLM_MODEL}"
-  ollama pull "${LLM_MODEL}"
-fi
+log "Modell-Check …"
+python transcribe_omni.py --check --check-load || exit 4
 
 OUT_DIR="${OUTPUT_DIR:-output}"
 mkdir -p "${OUT_DIR}"

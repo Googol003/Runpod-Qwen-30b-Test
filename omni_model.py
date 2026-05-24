@@ -27,10 +27,78 @@ def _detect_family(model_id: str) -> str:
     return "qwen25"
 
 
+def _build_load_kwargs(*, local_only: bool, family: str) -> dict[str, Any]:
+    """
+    device_map=auto legt bei zu wenig VRAM still Teile auf CPU.
+    30B-A3B auf 32 GB: OMNI_LOAD_IN_4BIT=1 und OMNI_NO_CPU_OFFLOAD=1.
+    """
+    import torch
+
+    kwargs: dict[str, Any] = {}
+    if local_only:
+        kwargs["local_files_only"] = True
+
+    load_4 = _env_bool("OMNI_LOAD_IN_4BIT", False)
+    load_8 = _env_bool("OMNI_LOAD_IN_8BIT", False)
+    no_cpu = _env_bool("OMNI_NO_CPU_OFFLOAD", False)
+    device_map = (os.getenv("OMNI_DEVICE_MAP") or "").strip()
+
+    if load_4 and load_8:
+        raise OmniModelError("Nur OMNI_LOAD_IN_4BIT oder OMNI_LOAD_IN_8BIT setzen, nicht beides.")
+
+    if load_4 or load_8:
+        try:
+            from transformers import BitsAndBytesConfig  # type: ignore
+        except ImportError as e:
+            raise OmniModelError(
+                "Quantisierung braucht bitsandbytes: pip install bitsandbytes"
+            ) from e
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=load_4,
+            load_in_8bit=load_8,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        kwargs["device_map"] = device_map or "cuda:0"
+        return kwargs
+
+    if no_cpu:
+        if not torch.cuda.is_available():
+            raise OmniModelError("OMNI_NO_CPU_OFFLOAD=1, aber keine CUDA-GPU sichtbar.")
+        idx = 0
+        total_gb = torch.cuda.get_device_properties(idx).total_memory / (1024**3)
+        reserve_gb = float(os.getenv("OMNI_GPU_RESERVE_GB", "3") or "3")
+        cap_gb = max(1, int(total_gb - reserve_gb))
+        kwargs["device_map"] = device_map or "auto"
+        kwargs["max_memory"] = {idx: f"{cap_gb}GiB", "cpu": "0GiB"}
+        return kwargs
+
+    kwargs["device_map"] = device_map or "auto"
+    return kwargs
+
+
+def _assert_no_cpu_offload_if_requested(model: Any) -> None:
+    if not _env_bool("OMNI_NO_CPU_OFFLOAD", False):
+        return
+    cpuish = 0
+    total = 0
+    for p in model.parameters():
+        total += p.numel()
+        d = str(p.device).lower()
+        if "cpu" in d or "meta" in d:
+            cpuish += p.numel()
+    if total and cpuish > total * 0.01:
+        raise OmniModelError(
+            f"OMNI_NO_CPU_OFFLOAD=1, aber {100.0 * cpuish / total:.1f}% der Parameter "
+            "liegen noch auf CPU/Meta. Unquantisiert braucht 30B-A3B ~60 GB (BF16) — "
+            "auf 32 GB RTX 5090: export OMNI_LOAD_IN_4BIT=1 (pip install bitsandbytes)."
+        )
+
+
 def _resolve_model_source(model_id: str) -> tuple[str, bool]:
     """
     Hugging-Face-Repo-ID (namespace/name) oder lokaler Ordner mit config.json.
-    Fehlt der Ordner, wirft HF sonst „Repo id must be …“ für absolute Pfade.
     """
     raw = (model_id or "").strip()
     if not raw:
@@ -51,6 +119,72 @@ def _resolve_model_source(model_id: str) -> tuple[str, bool]:
             f"--local-dir {p}"
         )
     return raw, False
+
+
+def load_plan_lines(model_id: str) -> list[str]:
+    """Konfiguration vor dem Laden (ohne Gewichte zu laden)."""
+    mid = model_id.lower()
+    family = _detect_family(model_id)
+    load_4 = _env_bool("OMNI_LOAD_IN_4BIT", False)
+    load_8 = _env_bool("OMNI_LOAD_IN_8BIT", False)
+    no_cpu = _env_bool("OMNI_NO_CPU_OFFLOAD", False)
+    flash = _env_bool("OMNI_FLASH_ATTN", True)
+    dm_env = (os.getenv("OMNI_DEVICE_MAP") or "").strip()
+    if load_4 or load_8:
+        device_map = dm_env or "cuda:0"
+    elif no_cpu:
+        device_map = dm_env or "auto (max_memory, cpu=0)"
+    else:
+        device_map = dm_env or "auto"
+
+    if load_4:
+        quant = "4-bit NF4 (bitsandbytes)"
+    elif load_8:
+        quant = "8-bit (bitsandbytes)"
+    else:
+        quant = "keine — dtype/torch_dtype=auto (typ. BF16/FP16, ~60 GB bei 30B)"
+
+    lines = [
+        f"Backend: Hugging Face transformers (Qwen-Omni, Familie: {family})",
+        f"OMNI_MODEL_ID: {model_id}",
+        f"Quantisierung: {quant}",
+        f"device_map: {device_map}",
+        f"OMNI_NO_CPU_OFFLOAD: {'ja' if no_cpu else 'nein'}",
+        f"OMNI_FLASH_ATTN: {'ja' if flash else 'nein'}",
+    ]
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            lines.append(f"CUDA: {torch.cuda.get_device_name(0)} ({gb:.1f} GB)")
+        else:
+            lines.append("CUDA: nicht verfügbar")
+    except ImportError:
+        lines.append("torch: nicht installiert")
+
+    if load_4 or load_8:
+        try:
+            import bitsandbytes  # noqa: F401
+
+            lines.append("bitsandbytes: installiert")
+        except ImportError:
+            lines.append("bitsandbytes: FEHLT — pip install bitsandbytes")
+
+    if ("30b" in mid or "qwen3" in mid) and not load_4 and not load_8:
+        lines.append(
+            "HINWEIS: 30B ohne 4-bit auf ≤32 GB GPU → CPU-Offload (sehr langsam). "
+            "Setze OMNI_LOAD_IN_4BIT=1"
+        )
+
+    try:
+        src, local = _resolve_model_source(model_id)
+        lines.append(f"Quelle: {src} ({'lokal' if local else 'Hugging Face Hub'})")
+    except OmniModelError as e:
+        lines.append(f"Quelle: FEHLER — {e}")
+
+    return lines
 
 
 @dataclass
@@ -76,13 +210,9 @@ class OmniEngine:
 
         attn = "flash_attention_2" if self._flash_attn else None
         model_source, local_only = _resolve_model_source(self.model_id)
-        kwargs: dict[str, Any] = {
-            "device_map": "auto",
-        }
-        if local_only:
-            kwargs["local_files_only"] = True
-        if attn:
-            kwargs["attn_implementation"] = attn
+        load_kw = _build_load_kwargs(local_only=local_only, family=self._family)
+        if attn and not load_kw.get("quantization_config"):
+            load_kw["attn_implementation"] = attn
 
         if self._family == "qwen3":
             try:
@@ -95,9 +225,10 @@ class OmniEngine:
                     "Qwen3-Omni braucht eine aktuelle transformers-Version "
                     "(siehe README / pip install transformers -U)."
                 ) from e
-            kwargs["dtype"] = "auto"
+            if not load_kw.get("quantization_config"):
+                load_kw["dtype"] = "auto"
             self._model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-                model_source, **kwargs
+                model_source, **load_kw
             )
             if hasattr(self._model, "disable_talker"):
                 self._model.disable_talker()
@@ -115,18 +246,20 @@ class OmniEngine:
                     "Qwen2.5-Omni braucht transformers mit Qwen2_5Omni "
                     "(siehe README)."
                 ) from e
-            kwargs["torch_dtype"] = "auto"
+            if not load_kw.get("quantization_config"):
+                load_kw["torch_dtype"] = "auto"
             self._model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                model_source, **kwargs
+                model_source, **load_kw
             )
             self._processor = Qwen2_5OmniProcessor.from_pretrained(
                 model_source, local_files_only=local_only
             )
 
-        _ = torch  # noqa: F841 — nur Import-Check
+        _assert_no_cpu_offload_if_requested(self._model)
+        _ = torch  # noqa: F841
 
     def device_report_lines(self) -> list[str]:
-        """Kurzbericht: welche Anteile des Modells auf GPU vs. CPU liegen."""
+        """Nach dem Laden: GPU/CPU-Aufteilung."""
         if self._model is None:
             return ["Modell nicht geladen."]
         try:
@@ -135,6 +268,15 @@ class OmniEngine:
             return ["torch nicht verfügbar."]
 
         lines: list[str] = []
+        is_4bit = getattr(self._model, "is_loaded_in_4bit", False)
+        is_8bit = getattr(self._model, "is_loaded_in_8bit", False)
+        if is_4bit:
+            lines.append("Geladen als: 4-bit quantisiert (bitsandbytes)")
+        elif is_8bit:
+            lines.append("Geladen als: 8-bit quantisiert (bitsandbytes)")
+        else:
+            lines.append("Geladen als: unquantisiert (dtype auto)")
+
         if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
             gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
@@ -160,10 +302,11 @@ class OmniEngine:
         )
         if cpuish > total * 0.05:
             lines.append(
-                "  Hinweis: Teile des Modells liegen auf CPU (Offload). "
-                "Inferenz nutzt die GPU, ist aber deutlich langsamer — erster Chunk kann "
-                "viele Minuten dauern; tqdm bleibt bis dahin bei 0%."
+                "  WARNUNG: Teile auf CPU/Meta (Offload). Bei 30B auf 32 GB: "
+                "OMNI_LOAD_IN_4BIT=1 + OMNI_NO_CPU_OFFLOAD=1 + pip install bitsandbytes"
             )
+        elif "qwen3" in self.model_id.lower() or "30b" in self.model_id.lower():
+            lines.append("  Modell vollständig auf GPU (kein CPU-Offload erkannt).")
         return lines
 
     @property
@@ -302,7 +445,6 @@ def _run_with_heartbeat(fn: Callable[[], _T], *, label: str) -> _T:
 def build_engine_from_env() -> OmniEngine:
     model_id = (
         os.getenv("OMNI_MODEL_ID")
-        or os.getenv("LLM_MODEL")
         or "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     )
     max_new = int(os.getenv("OMNI_MAX_NEW_TOKENS", "1024") or "1024")

@@ -22,7 +22,7 @@ from audio_chunks import (
 )
 from export_results import write_outputs
 from json_util import parse_json_response
-from omni_model import OmniModelError, build_engine_from_env
+from omni_model import OmniModelError, build_engine_from_env, load_plan_lines
 from prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 
@@ -199,7 +199,8 @@ def run(
 
         print(f"[2/4] Lade Modell …")
         engine = build_engine_from_env()
-        print(f"      {engine.model_id} (Familie: {engine._family})")
+        for line in load_plan_lines(engine.model_id):
+            print(f"      {line}")
         engine.load()
         print(f"      Modell bereit.")
         for line in engine.device_report_lines():
@@ -329,7 +330,30 @@ def main() -> None:
         action="store_true",
         help="Temporäre WAV-Chunks nicht löschen",
     )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="Nur Modell-Konfiguration prüfen (optional Gewichte laden mit --check-load)",
+    )
+    ap.add_argument(
+        "--check-load",
+        action="store_true",
+        help="Mit --check: Modell wirklich laden und GPU/Quantisierung verifizieren",
+    )
     args = ap.parse_args()
+    if args.check:
+        engine = build_engine_from_env()
+        print("=== Modell-Check (Hugging Face Qwen-Omni) ===")
+        for line in load_plan_lines(engine.model_id):
+            print(f"  {line}")
+        if args.check_load:
+            print("\nLade Gewichte …")
+            engine.load()
+            for line in engine.device_report_lines():
+                print(f"  {line}")
+        else:
+            print("\nTipp: --check-load lädt das Modell und prüft 4-bit / GPU-Offload.")
+        raise SystemExit(0)
     if args.max_new_tokens is not None:
         os.environ["OMNI_MAX_NEW_TOKENS"] = str(args.max_new_tokens)
     raise SystemExit(
