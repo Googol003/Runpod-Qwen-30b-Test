@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
 
 from pathlib import Path
 

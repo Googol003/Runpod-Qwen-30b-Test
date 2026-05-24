@@ -38,6 +38,41 @@ def _detect_family(model_id: str) -> str:
     return "qwen25"
 
 
+def _transformers_version_tuple() -> tuple[int, int, int] | None:
+    try:
+        import importlib.metadata as md
+
+        raw = md.version("transformers")
+        parts = []
+        for p in raw.split(".")[:3]:
+            parts.append(int("".join(c for c in p if c.isdigit()) or "0"))
+        while len(parts) < 3:
+            parts.append(0)
+        return parts[0], parts[1], parts[2]
+    except Exception:
+        return None
+
+
+def _transformers_compat_lines() -> list[str]:
+    ver = _transformers_version_tuple()
+    if ver is None:
+        return ["transformers: Version unbekannt"]
+    if ver[0] >= 5:
+        return [
+            f"FEHLER: transformers {ver[0]}.{ver[1]}.{ver[2]} — 4-bit MoE bricht ab v5",
+            "Symptom: ~31 GB VRAM bei 57 % Laden (unquantisiert auf GPU).",
+            "Fix: pip install 'transformers>=4.51.0,<5.0.0'",
+            "Zusätzlich: HF_DEACTIVATE_ASYNC_LOAD=1 (in .env)",
+        ]
+    return [f"transformers: {ver[0]}.{ver[1]}.{ver[2]} OK (<5)"]
+
+
+def _prepare_load_env() -> None:
+    """Workaround Transformers 5 async load + allocator (Gist + HF #43032 / #44387)."""
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
+
+
 def _gpu_total_gb() -> float | None:
     try:
         import torch
@@ -106,6 +141,11 @@ def load_plan_lines(model_id: str) -> list[str]:
     gb = _gpu_total_gb()
     if gb:
         lines.append(f"GPU: {gb:.1f} GB")
+    lines.extend(_transformers_compat_lines())
+    if os.getenv("HF_DEACTIVATE_ASYNC_LOAD", "").strip() in ("1", "true", "yes"):
+        lines.append("HF_DEACTIVATE_ASYNC_LOAD: 1")
+    else:
+        lines.append("WARNUNG: HF_DEACTIVATE_ASYNC_LOAD nicht gesetzt (OOM-Risiko ab transformers 5)")
     try:
         import bitsandbytes  # noqa: F401
 
@@ -131,7 +171,19 @@ def _load_qwen3_gist(model_source: str, *, local_only: bool) -> Any:
         Qwen3OmniMoeForConditionalGeneration,
     )
 
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    _prepare_load_env()
+    ver = _transformers_version_tuple()
+    if ver is not None and ver[0] >= 5:
+        raise OmniModelError(
+            "\n".join(
+                [
+                    "transformers >= 5.0 — 4-bit für Qwen3-Omni-MoE funktioniert so nicht.",
+                    "Lade zuerst unquantisiert auf die GPU (~31 GB) → OOM bei 57 %.",
+                    "pip install 'transformers>=4.51.0,<5.0.0'",
+                    "export HF_DEACTIVATE_ASYNC_LOAD=1",
+                ]
+            )
+        )
 
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -234,13 +286,13 @@ class OmniEngine:
                 raise OmniModelError(
                     "\n".join(
                         [
-                            "CUDA OOM — 4-bit sollte ~15 GB sein, nicht 31 GB.",
-                            "Wenn ~31 GB beim Laden: bitsandbytes quantisiert nicht richtig.",
-                            "Versuche:",
-                            "  pip install -U bitsandbytes transformers accelerate",
-                            "  pip install -U flash-attn --no-build-isolation  # weniger VRAM",
-                            "  export OMNI_FLASH_ATTN=1",
-                            "  Neuer Python-Prozess (nach OOM)",
+                            "CUDA OOM bei ~57 % / ~31 GB — typisch transformers 5.x + 4-bit MoE.",
+                            "Gewichte werden VOR der Quantisierung als FP16 auf die GPU kopiert.",
+                            "Fix (RunPod):",
+                            "  pip install 'transformers>=4.51.0,<5.0.0'",
+                            "  export HF_DEACTIVATE_ASYNC_LOAD=1",
+                            "  Neuer Python-Prozess (VRAM nach OOM leeren)",
+                            "Optional (Gist): flash-attn + OMNI_FLASH_ATTN=1",
                             *load_plan_lines(self.model_id),
                         ]
                     )
@@ -382,7 +434,7 @@ def apply_runpod_defaults() -> None:
     os.environ.setdefault("OMNI_LOAD_IN_4BIT", "1")
     os.environ.setdefault("OMNI_ENABLE_AUDIO_OUTPUT", "0")
     os.environ.setdefault("OMNI_FLASH_ATTN", "0")
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    _prepare_load_env()
 
 
 def _engine_max_new_tokens_default() -> int:

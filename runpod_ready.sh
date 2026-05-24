@@ -7,7 +7,9 @@ cd "${SCRIPT_DIR}"
 [[ -d .venv ]] || python -m venv .venv
 source .venv/bin/activate
 apt-get update -qq && apt-get install -y -qq ffmpeg 2>/dev/null || true
-pip install -q -U pip bitsandbytes transformers accelerate qwen-omni-utils -r requirements.txt
+pip install -q -U pip
+pip install -q -r requirements.txt
+pip install -q -U bitsandbytes accelerate qwen-omni-utils
 [[ -f .env ]] || cp .env.example .env
 set -a && source .env && set +a
 python transcribe_omni.py --check --check-load
