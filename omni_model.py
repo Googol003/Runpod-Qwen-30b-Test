@@ -159,8 +159,10 @@ def load_plan_lines(model_id: str) -> list[str]:
         dm = f"{strategy} → GPU max {_gpu_cap_gib()}"
     elif load_8:
         quant = "8-bit (bitsandbytes)"
+        dm = (os.getenv("OMNI_DEVICE_MAP") or "auto").strip() or "auto"
     else:
         quant = "KEIN 4-bit (~60 GB BF16) — auf 5090 32 GB → OOM"
+        dm = (os.getenv("OMNI_DEVICE_MAP") or "auto").strip() or "auto"
 
     lines = [
         f"Modell: {model_id} (Familie: {family})",
