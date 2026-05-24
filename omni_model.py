@@ -176,6 +176,7 @@ class OmniEngine:
         wav_path: Path,
         system_prompt: str,
         user_prompt: str,
+        max_new_tokens: Optional[int] = None,
     ) -> str:
         self.load()
         from qwen_omni_utils import process_mm_info  # type: ignore
@@ -218,26 +219,31 @@ class OmniEngine:
             inputs = inputs.to(model.dtype)
         input_len = inputs["input_ids"].shape[1]
 
+        token_limit = (
+            self.max_new_tokens if max_new_tokens is None else max_new_tokens
+        )
         gen_kwargs: dict[str, Any] = {
-            "max_new_tokens": self.max_new_tokens,
+            "max_new_tokens": token_limit,
             "use_audio_in_video": use_audio_in_video,
             "return_audio": False,
+            "do_sample": False,
         }
-        label = f"Chunk-Inferenz ({wav_path.name})"
+        label = f"Chunk-Inferenz ({wav_path.name}, max_new={token_limit})"
+
+        import torch
+
+        def _generate():
+            with torch.inference_mode():
+                return model.generate(**inputs, **gen_kwargs)
+
         if self._family == "qwen3":
-            out = _run_with_heartbeat(
-                lambda: model.generate(**inputs, **gen_kwargs),
-                label=label,
-            )
+            out = _run_with_heartbeat(_generate, label=label)
             if hasattr(out, "sequences"):
                 gen_ids = out.sequences[:, input_len:]
             else:
                 gen_ids = out[:, input_len:]
         else:
-            out = _run_with_heartbeat(
-                lambda: model.generate(**inputs, **gen_kwargs),
-                label=label,
-            )
+            out = _run_with_heartbeat(_generate, label=label)
             gen_ids = out[:, input_len:]
 
         decoded = processor.batch_decode(
@@ -299,6 +305,6 @@ def build_engine_from_env() -> OmniEngine:
         or os.getenv("LLM_MODEL")
         or "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     )
-    max_new = int(os.getenv("OMNI_MAX_NEW_TOKENS", "2048") or "2048")
+    max_new = int(os.getenv("OMNI_MAX_NEW_TOKENS", "1024") or "1024")
     flash = _env_bool("OMNI_FLASH_ATTN", True)
     return OmniEngine(model_id=model_id.strip(), flash_attn=flash, max_new_tokens=max_new)

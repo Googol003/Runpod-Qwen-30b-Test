@@ -14,8 +14,10 @@ from typing import Any, Dict, List
 
 from audio_chunks import (
     AudioChunk,
+    estimate_chunk_count,
     make_work_dir,
     prepare_master_wav,
+    probe_duration_sec,
     slice_chunks,
 )
 from export_results import write_outputs
@@ -80,6 +82,30 @@ def _progress_chunk_done(
     )
 
 
+def max_new_tokens_for_chunk(duration_sec: float) -> int:
+    """
+    Antwortlänge pro 30s-Clip begrenzen (nicht 2048 für wenig Sprache).
+    OMNI_MAX_NEW_TOKENS leer/auto → skaliert mit Clip-Dauer, Deckel 1024.
+  """
+    raw = (os.getenv("OMNI_MAX_NEW_TOKENS") or "").strip().lower()
+    if raw and raw not in ("auto", ""):
+        return max(128, int(raw))
+    auto = int(duration_sec * 18) + 180
+    return max(384, min(1024, auto))
+
+
+def _maybe_empty_cuda_cache() -> None:
+    if not _env_bool("OMNI_EMPTY_CUDA", False):
+        return
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def _load_dotenv() -> None:
     root = Path(__file__).resolve().parent
     for p in (root / ".env", root.parent / ".env"):
@@ -131,6 +157,7 @@ def run(
     chunk_sec: float,
     overlap_sec: float,
     keep_work: bool,
+    max_new_tokens_cli: int | None = None,
 ) -> int:
     audio = audio.resolve()
     out_dir = out_dir.resolve()
@@ -148,7 +175,27 @@ def run(
         if not chunks:
             print("Keine Audio-Chunks erzeugt (Datei zu kurz?).", file=sys.stderr)
             return 3
-        print(f"      {len(chunks)} Chunk(s), je ~{chunk_sec}s (Overlap {overlap_sec}s)")
+        audio_dur = probe_duration_sec(master)
+        step = max(0.1, chunk_sec - max(0.0, min(overlap_sec, chunk_sec * 0.5)))
+        expect = estimate_chunk_count(
+            audio_dur, chunk_sec=chunk_sec, overlap_sec=overlap_sec
+        )
+        print(
+            f"      Audio: {audio_dur / 60:.1f} min ({audio_dur:.0f} s) "
+            f"→ {len(chunks)} Chunk(s) à ~{chunk_sec}s "
+            f"(Schritt {step:.0f}s, Overlap {overlap_sec}s)"
+        )
+        if expect != len(chunks):
+            print(f"      (erwartet laut Dauer: {expect} Chunks)")
+        print(
+            "      Pro Chunk nur ~30 s WAV ans Modell — nie die komplette Datei auf einmal."
+        )
+        if len(chunks) > 15:
+            print(
+                f"      Gesamt: {len(chunks)} Modell-Läufe nacheinander. "
+                "Bei 30B + CPU-Offload kann das Stunden dauern — "
+                "für 27 min eher Qwen2.5-Omni-7B auf GPU (OMNI_MODEL_ID)."
+            )
 
         print(f"[2/4] Lade Modell …")
         engine = build_engine_from_env()
@@ -180,11 +227,18 @@ def run(
                 chunk_end_sec=chunk.end_sec,
                 chunk_duration_sec=chunk.duration_sec,
             )
+            tok_limit = (
+                max(128, max_new_tokens_cli)
+                if max_new_tokens_cli is not None
+                else max_new_tokens_for_chunk(chunk.duration_sec)
+            )
             raw = engine.transcribe_clip(
                 wav_path=chunk.path,
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
+                max_new_tokens=tok_limit,
             )
+            _maybe_empty_cuda_cache()
             elapsed = time.time() - t0
             parsed = _parse_chunk_json(raw, chunk)
             chunk_results.append(parsed)
@@ -265,11 +319,19 @@ def main() -> None:
         help="Überlappung zwischen Chunks (Standard: 2)",
     )
     ap.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="Max. generierte Tokens pro Chunk (sonst auto ~384–1024)",
+    )
+    ap.add_argument(
         "--keep-work",
         action="store_true",
         help="Temporäre WAV-Chunks nicht löschen",
     )
     args = ap.parse_args()
+    if args.max_new_tokens is not None:
+        os.environ["OMNI_MAX_NEW_TOKENS"] = str(args.max_new_tokens)
     raise SystemExit(
         run(
             audio=Path(args.audio),
@@ -277,6 +339,7 @@ def main() -> None:
             chunk_sec=args.chunk_sec,
             overlap_sec=args.overlap_sec,
             keep_work=args.keep_work,
+            max_new_tokens_cli=args.max_new_tokens,
         )
     )
 

@@ -91,6 +91,25 @@ def prepare_master_wav(audio_path: Path, work_dir: Path) -> Path:
     return convert_to_wav_16k_mono(audio_path, master)
 
 
+def estimate_chunk_count(
+    total_sec: float, *, chunk_sec: float, overlap_sec: float
+) -> int:
+    """Wie viele Chunks ``slice_chunks`` für diese Dauer erzeugt (ohne ffmpeg)."""
+    if total_sec <= 0 or chunk_sec <= 0:
+        return 0
+    overlap_sec = max(0.0, min(overlap_sec, chunk_sec * 0.5))
+    step = max(0.1, chunk_sec - overlap_sec)
+    count = 0
+    start = 0.0
+    while start < total_sec - 0.05:
+        count += 1
+        end = min(total_sec, start + chunk_sec)
+        if end >= total_sec - 0.05:
+            break
+        start += step
+    return count
+
+
 def slice_chunks(
     master_wav: Path,
     work_dir: Path,
