@@ -213,7 +213,7 @@ def run(
                 "für 27 min eher Qwen2.5-Omni-7B auf GPU (OMNI_MODEL_ID)."
             )
 
-        print(f"[2/4] Lade Modell …")
+        print(f"[2/4] Lade Modell … (unabhängig von Audiolänge — nur Gewichte in VRAM)")
         engine = build_engine_from_env()
         for line in load_plan_lines(engine.model_id):
             print(f"      {line}")

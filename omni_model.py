@@ -145,7 +145,7 @@ def load_plan_lines(model_id: str) -> list[str]:
     flash = _env_bool("OMNI_FLASH_ATTN", True)
     dm_env = (os.getenv("OMNI_DEVICE_MAP") or "").strip()
     if load_4 or load_8:
-        device_map = dm_env or "cuda:0"
+        device_map = dm_env or "auto (max_memory)"
     elif no_cpu:
         device_map = dm_env or "auto (max_memory, cpu=0)"
     else:
@@ -198,6 +198,39 @@ def load_plan_lines(model_id: str) -> list[str]:
     except OmniModelError as e:
         lines.append(f"Quelle: FEHLER — {e}")
 
+    lines.append(
+        "Audio-Länge (27 min o.ä.) spielt beim Laden KEINE Rolle — "
+        "OOM hier = Modell/VRAM, nicht die WAV-Datei."
+    )
+    return lines
+
+
+def oom_diagnosis_lines(model_id: str) -> list[str]:
+    mid = model_id.lower()
+    lines = [
+        "CUDA OOM beim LADEN der Modell-Gewichte (Schritt 2/4).",
+        "Die Audiodatei (auch 27 min) ist noch nicht im GPU-RAM — nur ffmpeg-WAV auf Disk.",
+        "27 min → ~58×30s-Chunks betrifft nur die Zeit NACH erfolgreichem Laden.",
+    ]
+    if not _env_bool("OMNI_LOAD_IN_4BIT", False):
+        lines.append("Ursache wahrscheinlich: OMNI_LOAD_IN_4BIT=0 → ~60 GB BF16, passt nicht in 32 GB.")
+    else:
+        lines.append(
+            "Ursache wahrscheinlich: 30B-Omni (Thinker+Talker+Audio-Tower) "
+            "sprengt 32 GB selbst mit 4-bit-Lade-Peak."
+        )
+    lines.extend(
+        [
+            "Fix 1: cp .env.example .env (OMNI_LOAD_IN_4BIT=1, OMNI_ENABLE_AUDIO_OUTPUT=0)",
+            "Fix 2: pip install bitsandbytes && frischer Python-Prozess (nvidia-smi prüfen)",
+            "Fix 3: OMNI_MODEL_ID=Qwen/Qwen2.5-Omni-7B (passt unquantisiert auf 32 GB)",
+            "Fix 4: AWQ-Variante oder größere GPU (48–80 GB)",
+        ]
+    )
+    if "30b" in mid or "qwen3" in mid:
+        lines.append(
+            "Optional: Qwen3-Omni-30B-A3B-Thinking (nur Text, kein Talker) statt Instruct."
+        )
     return lines
 
 
@@ -246,10 +279,24 @@ class OmniEngine:
                 ) from e
             if not load_kw.get("quantization_config"):
                 load_kw["dtype"] = "auto"
-            self._model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-                model_source, **load_kw
-            )
-            if hasattr(self._model, "disable_talker"):
+            # Talker/Code2Wav nicht laden → ~2–10 GB weniger VRAM (nur Transkript)
+            if not _env_bool("OMNI_ENABLE_AUDIO_OUTPUT", False):
+                load_kw["enable_audio_output"] = False
+            try:
+                self._model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+                    model_source, **load_kw
+                )
+            except Exception as e:
+                err = str(e).lower()
+                if "out of memory" in err or "cuda" in err and "memory" in err:
+                    raise OmniModelError(
+                        "\n".join(oom_diagnosis_lines(self.model_id))
+                    ) from e
+                raise
+            if (
+                _env_bool("OMNI_ENABLE_AUDIO_OUTPUT", False)
+                and hasattr(self._model, "disable_talker")
+            ):
                 self._model.disable_talker()
             self._processor = Qwen3OmniMoeProcessor.from_pretrained(
                 model_source, local_files_only=local_only
@@ -267,9 +314,19 @@ class OmniEngine:
                 ) from e
             if not load_kw.get("quantization_config"):
                 load_kw["torch_dtype"] = "auto"
-            self._model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                model_source, **load_kw
-            )
+            if not _env_bool("OMNI_ENABLE_AUDIO_OUTPUT", False):
+                load_kw["enable_audio_output"] = False
+            try:
+                self._model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+                    model_source, **load_kw
+                )
+            except Exception as e:
+                err = str(e).lower()
+                if "out of memory" in err or "cuda" in err and "memory" in err:
+                    raise OmniModelError(
+                        "\n".join(oom_diagnosis_lines(self.model_id))
+                    ) from e
+                raise
             self._processor = Qwen2_5OmniProcessor.from_pretrained(
                 model_source, local_files_only=local_only
             )
@@ -484,9 +541,9 @@ def apply_runpod_defaults() -> None:
     except ImportError:
         return
     os.environ.setdefault("OMNI_LOAD_IN_4BIT", "1")
-    os.environ.setdefault("OMNI_NO_CPU_OFFLOAD", "1")
+    os.environ.setdefault("OMNI_ENABLE_AUDIO_OUTPUT", "0")
     os.environ.setdefault("OMNI_FLASH_ATTN", "0")
-    os.environ.setdefault("OMNI_DEVICE_MAP", "cuda:0")
+    os.environ.setdefault("OMNI_DEVICE_MAP", "auto")
 
 
 def _engine_max_new_tokens_default() -> int:
