@@ -24,6 +24,32 @@ def _detect_family(model_id: str) -> str:
     return "qwen25"
 
 
+def _resolve_model_source(model_id: str) -> tuple[str, bool]:
+    """
+    Hugging-Face-Repo-ID (namespace/name) oder lokaler Ordner mit config.json.
+    Fehlt der Ordner, wirft HF sonst „Repo id must be …“ für absolute Pfade.
+    """
+    raw = (model_id or "").strip()
+    if not raw:
+        raise OmniModelError("OMNI_MODEL_ID ist leer")
+    p = Path(raw).expanduser()
+    if p.exists() and p.is_dir():
+        if not (p / "config.json").is_file():
+            raise OmniModelError(
+                f"Lokaler Modellordner unvollständig (kein config.json): {p}\n"
+                "Erneut laden: huggingface-cli download Qwen/Qwen3-Omni-30B-A3B-Instruct "
+                f"--local-dir {p}"
+            )
+        return str(p.resolve()), True
+    if raw.startswith("/") or raw.startswith("."):
+        raise OmniModelError(
+            f"Modellordner existiert nicht: {p}\n"
+            "Download: huggingface-cli download Qwen/Qwen3-Omni-30B-A3B-Instruct "
+            f"--local-dir {p}"
+        )
+    return raw, False
+
+
 @dataclass
 class OmniEngine:
     """Lädt Qwen2.5-Omni oder Qwen3-Omni einmal und transkribiert Audio-Clips."""
@@ -46,9 +72,12 @@ class OmniEngine:
             raise OmniModelError("torch nicht installiert") from e
 
         attn = "flash_attention_2" if self._flash_attn else None
+        model_source, local_only = _resolve_model_source(self.model_id)
         kwargs: dict[str, Any] = {
             "device_map": "auto",
         }
+        if local_only:
+            kwargs["local_files_only"] = True
         if attn:
             kwargs["attn_implementation"] = attn
 
@@ -65,11 +94,13 @@ class OmniEngine:
                 ) from e
             kwargs["dtype"] = "auto"
             self._model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-                self.model_id, **kwargs
+                model_source, **kwargs
             )
             if hasattr(self._model, "disable_talker"):
                 self._model.disable_talker()
-            self._processor = Qwen3OmniMoeProcessor.from_pretrained(self.model_id)
+            self._processor = Qwen3OmniMoeProcessor.from_pretrained(
+                model_source, local_files_only=local_only
+            )
         else:
             try:
                 from transformers import (  # type: ignore
@@ -83,9 +114,11 @@ class OmniEngine:
                 ) from e
             kwargs["torch_dtype"] = "auto"
             self._model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                self.model_id, **kwargs
+                model_source, **kwargs
             )
-            self._processor = Qwen2_5OmniProcessor.from_pretrained(self.model_id)
+            self._processor = Qwen2_5OmniProcessor.from_pretrained(
+                model_source, local_files_only=local_only
+            )
 
         _ = torch  # noqa: F841 — nur Import-Check
 
