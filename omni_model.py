@@ -47,7 +47,7 @@ def _require_bitsandbytes() -> None:
         ) from e
 
 
-def _bnb_config(*, load_4: bool, load_8: bool) -> Any:
+def _bnb_config(*, load_4: bool, load_8: bool, cpu_offload: bool = False) -> Any:
     import torch
     from transformers import BitsAndBytesConfig  # type: ignore
 
@@ -57,6 +57,7 @@ def _bnb_config(*, load_4: bool, load_8: bool) -> Any:
         bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
+        llm_int8_enable_fp32_cpu_offload=cpu_offload,
     )
 
 
@@ -68,8 +69,8 @@ def _gpu_cap_gib() -> str:
     gb = _gpu_total_gb()
     if gb is None:
         return "22GiB"
-    reserve = float(os.getenv("OMNI_GPU_RESERVE_GB", "8") or "8")
-    return f"{max(12, int(gb - reserve))}GiB"
+    reserve = float(os.getenv("OMNI_GPU_RESERVE_GB", "4") or "4")
+    return f"{max(16, int(gb - reserve))}GiB"
 
 
 def _build_load_kwargs(*, local_only: bool, family: str) -> dict[str, Any]:
@@ -90,15 +91,7 @@ def _build_load_kwargs(*, local_only: bool, family: str) -> dict[str, Any]:
 
     if load_4 or load_8:
         _require_bitsandbytes()
-        kwargs["quantization_config"] = _bnb_config(load_4=load_4, load_8=load_8)
-        strategy = (os.getenv("OMNI_LOAD_STRATEGY") or "staged").strip().lower()
-        cpu_mem = (os.getenv("OMNI_CPU_MEMORY") or "128GiB").strip()
-        if strategy == "cuda":
-            kwargs["device_map"] = "cuda"
-        else:
-            kwargs["device_map"] = "auto"
-            kwargs["max_memory"] = {0: _gpu_cap_gib(), "cpu": cpu_mem}
-        # Kein dtype/torch_dtype bei 4-bit — sonst doppelter Speicher beim Laden
+        # device_map / quantization_config pro Ladeversuch in _from_pretrained_4bit
         return kwargs
 
     no_cpu = _env_bool("OMNI_NO_CPU_OFFLOAD", False)
@@ -153,7 +146,7 @@ def load_plan_lines(model_id: str) -> list[str]:
     load_8 = _env_bool("OMNI_LOAD_IN_8BIT", False)
     no_audio = not _env_bool("OMNI_ENABLE_AUDIO_OUTPUT", False)
     flash = _env_bool("OMNI_FLASH_ATTN", True)
-    strategy = (os.getenv("OMNI_LOAD_STRATEGY") or "staged").strip()
+    strategy = (os.getenv("OMNI_LOAD_STRATEGY") or "cuda").strip()
     if load_4:
         quant = f"4-bit NF4 (~15 GB Gewichte, passt auf 32 GB)"
         dm = f"{strategy} → GPU max {_gpu_cap_gib()}"
@@ -200,9 +193,44 @@ def oom_diagnosis_lines(model_id: str) -> list[str]:
         "4-bit 30B ≈ 15 GB — sollte auf 32 GB passen.",
         *load_plan_lines(model_id),
         "Fix: git pull && cp .env.example .env",
-        "  export OMNI_LOAD_STRATEGY=staged OMNI_LOAD_IN_4BIT=1",
+        "  export OMNI_LOAD_STRATEGY=cuda OMNI_LOAD_IN_4BIT=1",
         "  python transcribe_omni.py --check --check-load",
     ]
+
+
+def _load_error_retryable(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    if "out of memory" in msg:
+        return True
+    if "dispatched on the cpu" in msg or "dispatched on the disk" in msg:
+        return True
+    return False
+
+
+def _kw_for_4bit_attempt(name: str, base_kw: dict[str, Any]) -> dict[str, Any]:
+    load_4 = _env_bool("OMNI_LOAD_IN_4BIT", False)
+    load_8 = _env_bool("OMNI_LOAD_IN_8BIT", False)
+    kw = {
+        k: v
+        for k, v in base_kw.items()
+        if k not in ("quantization_config", "device_map", "max_memory", "dtype", "torch_dtype")
+    }
+    cap = _gpu_cap_gib()
+    cpu_mem = (os.getenv("OMNI_CPU_MEMORY") or "128GiB").strip()
+    if name == "cuda":
+        kw["quantization_config"] = _bnb_config(
+            load_4=load_4, load_8=load_8, cpu_offload=False
+        )
+        kw["device_map"] = "cuda"
+    elif name == "staged":
+        kw["quantization_config"] = _bnb_config(
+            load_4=load_4, load_8=load_8, cpu_offload=True
+        )
+        kw["device_map"] = "auto"
+        kw["max_memory"] = {0: cap, "cpu": cpu_mem}
+    else:
+        raise ValueError(name)
+    return kw
 
 
 def _from_pretrained_4bit(
@@ -210,42 +238,34 @@ def _from_pretrained_4bit(
     model_source: str,
     *,
     base_kw: dict[str, Any],
+    model_id: str,
 ) -> Any:
-    """staged zuerst (vermeidet FP16-Lade-Peak), optional cuda als Fallback."""
+    """4-bit ~15 GB auf 32 GB: zuerst alles auf GPU (cuda), dann staged+CPU-Offload."""
     from gpu_memory import free_gpu_memory
 
-    load_4 = _env_bool("OMNI_LOAD_IN_4BIT", False)
-    if not load_4:
+    if not _env_bool("OMNI_LOAD_IN_4BIT", False):
         return model_cls.from_pretrained(model_source, **base_kw)
 
-    strategy = (os.getenv("OMNI_LOAD_STRATEGY") or "staged").strip().lower()
-    cpu_mem = (os.getenv("OMNI_CPU_MEMORY") or "128GiB").strip()
-    cap = _gpu_cap_gib()
-    attempts: list[tuple[str, dict[str, Any]]] = []
-    staged = {
-        **base_kw,
-        "device_map": "auto",
-        "max_memory": {0: cap, "cpu": cpu_mem},
-    }
-    cuda_kw = {k: v for k, v in base_kw.items() if k != "max_memory"}
-    cuda_kw["device_map"] = "cuda"
-    if strategy == "cuda":
-        attempts = [("cuda", cuda_kw), ("staged", staged)]
-    else:
-        attempts = [("staged", staged), ("cuda", cuda_kw)]
+    prefer = (os.getenv("OMNI_LOAD_STRATEGY") or "cuda").strip().lower()
+    order = ["cuda", "staged"] if prefer != "staged" else ["staged", "cuda"]
 
     last_err: Exception | None = None
-    for name, kw in attempts:
-        print(f"      Lade 4-bit ({name}, GPU-Limit {cap}) …", flush=True)
+    for name in order:
+        kw = _kw_for_4bit_attempt(name, base_kw)
+        label = (
+            f"{name}"
+            + (f", GPU max {_gpu_cap_gib()}" if name == "staged" else ", volle GPU")
+        )
+        print(f"      Lade 4-bit ({label}) …", flush=True)
         free_gpu_memory()
         try:
             return model_cls.from_pretrained(model_source, **kw)
         except Exception as e:
             last_err = e
-            if "out of memory" not in str(e).lower():
+            if not _load_error_retryable(e):
                 raise
-            print(f"      {name}: OOM — nächster Versuch …", flush=True)
-    raise OmniModelError("\n".join(oom_diagnosis_lines(""))) from last_err
+            print(f"      {name} fehlgeschlagen: {e!s:.200} …", flush=True)
+    raise OmniModelError("\n".join(oom_diagnosis_lines(model_id))) from last_err
 
 
 @dataclass
@@ -297,6 +317,7 @@ class OmniEngine:
                 Qwen3OmniMoeForConditionalGeneration,
                 model_source,
                 base_kw=load_kw,
+                model_id=self.model_id,
             )
             self._processor = Qwen3OmniMoeProcessor.from_pretrained(
                 model_source, local_files_only=local_only
@@ -313,6 +334,7 @@ class OmniEngine:
                 Qwen2_5OmniForConditionalGeneration,
                 model_source,
                 base_kw=load_kw,
+                model_id=self.model_id,
             )
             self._processor = Qwen2_5OmniProcessor.from_pretrained(
                 model_source, local_files_only=local_only
@@ -475,7 +497,7 @@ def apply_runpod_defaults() -> None:
     os.environ["OMNI_LOAD_IN_4BIT"] = "1"
     os.environ["OMNI_ENABLE_AUDIO_OUTPUT"] = "0"
     os.environ["OMNI_FLASH_ATTN"] = "0"
-    os.environ["OMNI_LOAD_STRATEGY"] = "staged"
+    os.environ["OMNI_LOAD_STRATEGY"] = "cuda"
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 

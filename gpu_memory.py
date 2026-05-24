@@ -75,7 +75,7 @@ def _nvidia_smi_lines() -> List[str]:
             used, total = (x.strip() for x in proc.stdout.strip().split(",")[:2])
             lines.append(f"nvidia-smi gesamt: {used} / {total} MiB belegt")
             used_mib = int(float(used))
-            if used_mib > 500:
+            if used_mib > 8000:
                 lines.append(
                     "  Hinweis: VRAM schon belegt (anderer Prozess?). "
                     "Stoppe Jupyter/Ollama/alte Python-Läufe: nvidia-smi"
