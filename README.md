@@ -1,36 +1,32 @@
-# Qwen-Omni Transkription (RunPod / RTX 5090)
-
-## 32 GB: genau diese Schritte
-
-```bash
-cd /Runpod-Qwen-30b-Test
-git pull
-pip install -U bitsandbytes transformers accelerate qwen-omni-utils
-
-cp .env.example .env
-
-# Neuer Prozess — nach OOM alten Python beenden
-python transcribe_omni.py --check --check-load
-```
-
-Erfolg = `OK: 4-bit quantisiert geladen` und `VRAM: ~18–24 / 31 GB`.
-
-```bash
-python transcribe_omni.py --audio TestAudio.mp3 --output-dir output
-```
-
-## Wichtig
-
-- **30B auf 32 GB nur mit 4-bit** (`OMNI_LOAD_IN_4BIT=1`, `OMNI_DEVICE_MAP=cuda`)
-- **`device_map=auto` vermeiden** — lädt oft unquantisiert bis OOM
-- **Talker aus** (`OMNI_ENABLE_AUDIO_OUTPUT=0`) — nur Transkript
-- **Audiolänge** (27 min) verursacht **kein** OOM beim Laden
-
-## Fallback
-
-```bash
-export OMNI_MODEL_ID=/workspace/models/Qwen2.5-Omni-7B
-export OMNI_LOAD_IN_4BIT=0
-python transcribe_omni.py --audio audio.mp3 -o output
-```
+# Qwen-Omni auf RunPod (RTX 5090 32 GB)
+
+**30B in 4-bit ≈ 15 GB** — das passt auf 32 GB.  
+OOM bei „Loading weights 57%“ = **Lade-Peak** (kurz FP16 auf GPU), nicht die finale Modellgröße.
+
+## Start
+
+```bash
+git pull
+pip install -U bitsandbytes transformers accelerate qwen-omni-utils
+cp .env.example .env
+
+python transcribe_omni.py --check --check-load
+python transcribe_omni.py --audio TestAudio.mp3 --output-dir output
+```
+
+Erfolg: `OK: 4-bit quantisiert` und `VRAM: ~15–22 / 31 GB`.
+
+## `.env` (wichtig)
+
+| Variable | Wert | Warum |
+|----------|------|--------|
+| `OMNI_LOAD_IN_4BIT` | `1` | ~15 GB statt ~60 GB |
+| `OMNI_LOAD_STRATEGY` | `staged` | kein 31-GB-Lade-Peak |
+| `OMNI_ENABLE_AUDIO_OUTPUT` | `0` | Talker nicht laden |
+
+**Nicht** `device_map=cuda` + `dtype=auto` beim Laden — das füllt die GPU mit FP16-Zwischenständen.
+
+## Audiolänge
+
+27 min → viele 30-s-Chunks **nach** dem Laden. Verursacht **kein** OOM in Schritt 2.
 
