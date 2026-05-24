@@ -56,6 +56,7 @@ if [[ ! -f .env ]]; then
   log "Keine .env — kopiere .env.example"
   cp .env.example .env
 fi
+set -a && source .env && set +a
 
 log "OMNI_MODEL_ID=${OMNI_MODEL_ID}"
 log "OMNI_LOAD_IN_4BIT=${OMNI_LOAD_IN_4BIT} OMNI_NO_CPU_OFFLOAD=${OMNI_NO_CPU_OFFLOAD}"
