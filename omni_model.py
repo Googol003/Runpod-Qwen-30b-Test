@@ -467,11 +467,22 @@ def apply_runpod_defaults() -> None:
     os.environ.setdefault("OMNI_DEVICE_MAP", "cuda:0")
 
 
+def _engine_max_new_tokens_default() -> int:
+    """Engine-Fallback; pro Chunk überschreibt transcribe_omni bei OMNI_MAX_NEW_TOKENS=auto."""
+    raw = (os.getenv("OMNI_MAX_NEW_TOKENS") or "").strip().lower()
+    if not raw or raw == "auto":
+        return 1024
+    return max(128, int(raw))
+
+
 def build_engine_from_env() -> OmniEngine:
     model_id = (
         os.getenv("OMNI_MODEL_ID")
         or "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     )
-    max_new = int(os.getenv("OMNI_MAX_NEW_TOKENS", "1024") or "1024")
     flash = _env_bool("OMNI_FLASH_ATTN", True)
-    return OmniEngine(model_id=model_id.strip(), flash_attn=flash, max_new_tokens=max_new)
+    return OmniEngine(
+        model_id=model_id.strip(),
+        flash_attn=flash,
+        max_new_tokens=_engine_max_new_tokens_default(),
+    )
