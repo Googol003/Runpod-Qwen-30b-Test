@@ -442,6 +442,31 @@ def _run_with_heartbeat(fn: Callable[[], _T], *, label: str) -> _T:
         thread.join(timeout=1.0)
 
 
+def apply_runpod_defaults() -> None:
+    """Falls .env fehlt: 30B auf ≤40 GB GPU → 4-bit + kein CPU-Offload."""
+    if _env_bool("OMNI_LOAD_IN_4BIT", False) or _env_bool("OMNI_LOAD_IN_8BIT", False):
+        return
+    model_id = (
+        os.getenv("OMNI_MODEL_ID") or "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    ).lower()
+    if "30b" not in model_id and "qwen3" not in model_id:
+        return
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return
+        gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        if gb > 40:
+            return
+    except ImportError:
+        return
+    os.environ.setdefault("OMNI_LOAD_IN_4BIT", "1")
+    os.environ.setdefault("OMNI_NO_CPU_OFFLOAD", "1")
+    os.environ.setdefault("OMNI_FLASH_ATTN", "0")
+    os.environ.setdefault("OMNI_DEVICE_MAP", "cuda:0")
+
+
 def build_engine_from_env() -> OmniEngine:
     model_id = (
         os.getenv("OMNI_MODEL_ID")

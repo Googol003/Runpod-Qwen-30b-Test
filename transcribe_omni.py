@@ -22,7 +22,12 @@ from audio_chunks import (
 )
 from export_results import write_outputs
 from json_util import parse_json_response
-from omni_model import OmniModelError, build_engine_from_env, load_plan_lines
+from omni_model import (
+    OmniModelError,
+    apply_runpod_defaults,
+    build_engine_from_env,
+    load_plan_lines,
+)
 from prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 
@@ -114,7 +119,7 @@ def _load_dotenv() -> None:
         try:
             from dotenv import load_dotenv  # type: ignore
 
-            load_dotenv(p, override=False)
+            load_dotenv(p, override=True)
         except ImportError:
             for raw in p.read_text(encoding="utf-8").splitlines():
                 line = raw.strip()
@@ -122,9 +127,14 @@ def _load_dotenv() -> None:
                     continue
                 k, _, v = line.partition("=")
                 k, v = k.strip(), v.strip().strip('"').strip("'")
-                if k and k not in os.environ:
+                if k:
                     os.environ[k] = v
         break
+
+
+def _bootstrap_env() -> None:
+    _load_dotenv()
+    apply_runpod_defaults()
 
 
 def _parse_chunk_json(raw: str, chunk: AudioChunk) -> Dict[str, Any]:
@@ -291,7 +301,7 @@ def run(
 
 
 def main() -> None:
-    _load_dotenv()
+    _bootstrap_env()
     ap = argparse.ArgumentParser(
         description="Qwen-Omni Transkription (RunPod): Timecodes, Überlappung, Sprecherwechsel."
     )

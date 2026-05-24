@@ -52,14 +52,10 @@ if [[ "${NEW_HASH}" != "${OLD_HASH}" ]]; then
   echo "${NEW_HASH}" > "${REQ_HASH_FILE}"
 fi
 
-[[ -f .env ]] && set -a && source .env && set +a
-
-export OMNI_MODEL_ID="${OMNI_MODEL_ID:-/workspace/models/Qwen3-Omni-30B-A3B-Instruct}"
-export OMNI_LOAD_IN_4BIT="${OMNI_LOAD_IN_4BIT:-1}"
-export OMNI_NO_CPU_OFFLOAD="${OMNI_NO_CPU_OFFLOAD:-1}"
-export OMNI_FLASH_ATTN="${OMNI_FLASH_ATTN:-0}"
-export OMNI_CHUNK_SEC="${OMNI_CHUNK_SEC:-30}"
-export OMNI_OVERLAP_SEC="${OMNI_OVERLAP_SEC:-2}"
+if [[ ! -f .env ]]; then
+  log "Keine .env — kopiere .env.example"
+  cp .env.example .env
+fi
 
 log "OMNI_MODEL_ID=${OMNI_MODEL_ID}"
 log "OMNI_LOAD_IN_4BIT=${OMNI_LOAD_IN_4BIT} OMNI_NO_CPU_OFFLOAD=${OMNI_NO_CPU_OFFLOAD}"
