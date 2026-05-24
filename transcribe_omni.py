@@ -71,10 +71,11 @@ def _progress_chunk_done(
         try:
             from tqdm import tqdm  # type: ignore
 
+            extra = f", overlap={overlap}" if overlap else ""
             tqdm.write(
                 f"      ✓ Chunk {chunk.index + 1}/{total} "
                 f"[{chunk.start_sec:.1f}–{chunk.end_sec:.1f}s] "
-                f"→ {n_utterances} Äußerung(en), overlap={overlap}, {elapsed_s:.1f}s"
+                f"→ {n_utterances} Äußerung(en){extra}, {elapsed_s:.1f}s"
             )
             return
         except ImportError:
@@ -82,8 +83,7 @@ def _progress_chunk_done(
     print(
         f"      Chunk {chunk.index + 1}/{total} "
         f"[{chunk.start_sec:.1f}–{chunk.end_sec:.1f}s] "
-        f"→ {n_utterances} Äußerung(en), overlap={overlap}, "
-        f"{elapsed_s:.1f}s",
+        f"→ {n_utterances} Äußerung(en), {elapsed_s:.1f}s",
         flush=True,
     )
 
@@ -96,8 +96,8 @@ def max_new_tokens_for_chunk(duration_sec: float) -> int:
     raw = (os.getenv("OMNI_MAX_NEW_TOKENS") or "").strip().lower()
     if raw and raw not in ("auto", ""):
         return max(128, int(raw))
-    auto = int(duration_sec * 18) + 180
-    return max(384, min(1024, auto))
+    auto = int(duration_sec * 10) + 120
+    return max(256, min(512, auto))
 
 
 def _maybe_empty_cuda_cache() -> None:
@@ -147,11 +147,6 @@ def _parse_chunk_json(raw: str, chunk: AudioChunk) -> Dict[str, Any]:
             "chunk_index": chunk.index,
             "chunk_start_sec": chunk.start_sec,
             "chunk_end_sec": chunk.end_sec,
-            "audio_quality": {
-                "overlap_speech": "unknown",
-                "hard_to_understand": True,
-                "notes": "Modell-Antwort war kein gültiges JSON",
-            },
             "utterances": [],
             "parse_error": True,
             "raw_text": (raw or "")[:4000],
@@ -267,12 +262,11 @@ def run(
                 }
             )
             n_ut = len(parsed.get("utterances") or [])
-            aq = parsed.get("audio_quality") or {}
             _progress_chunk_done(
                 chunk,
                 total=total,
                 n_utterances=n_ut,
-                overlap=str(aq.get("overlap_speech", "?")),
+                overlap="",
                 elapsed_s=elapsed,
                 enabled=use_tqdm,
             )

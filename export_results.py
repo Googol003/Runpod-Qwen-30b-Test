@@ -24,10 +24,6 @@ def flatten_utterances(
     for cr in chunk_results:
         chunk_start = float(cr.get("chunk_start_sec", 0.0))
         chunk_end = float(cr.get("chunk_end_sec", chunk_start))
-        aq = cr.get("audio_quality") or {}
-        overlap = str(aq.get("overlap_speech", ""))
-        hard = bool(aq.get("hard_to_understand", False))
-        notes = str(aq.get("notes", ""))
         for u in cr.get("utterances") or []:
             if not isinstance(u, dict):
                 continue
@@ -49,11 +45,7 @@ def flatten_utterances(
                     "text": text,
                     "speaker": str(u.get("speaker", "")),
                     "speaker_change_at_start": u.get("speaker_change_at_start"),
-                    "boundary_after": str(u.get("boundary_after", "unknown")),
                     "chunk_index": int(cr.get("chunk_index", 0)),
-                    "overlap_speech": overlap,
-                    "hard_to_understand": hard,
-                    "chunk_notes": notes,
                 }
             )
     return annotate_speaker_changes(rows)
@@ -95,27 +87,12 @@ def write_outputs(
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         pd.DataFrame(rows).to_excel(writer, sheet_name="utterances", index=False)
         summary = {
-            "key": [
-                "source_audio",
-                "model_id",
-                "utterance_count",
-                "chunks_with_heavy_overlap",
-                "chunks_hard_to_understand",
-            ],
+            "key": ["source_audio", "model_id", "utterance_count", "chunk_count"],
             "value": [
                 str(source_audio),
                 model_id,
                 len(rows),
-                sum(
-                    1
-                    for c in chunk_results
-                    if (c.get("audio_quality") or {}).get("overlap_speech") == "heavy"
-                ),
-                sum(
-                    1
-                    for c in chunk_results
-                    if (c.get("audio_quality") or {}).get("hard_to_understand")
-                ),
+                len(chunk_results),
             ],
         }
         pd.DataFrame(summary).to_excel(writer, sheet_name="summary", index=False)
