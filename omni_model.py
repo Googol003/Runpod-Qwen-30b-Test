@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 
 class OmniModelError(RuntimeError):
@@ -122,6 +125,47 @@ class OmniEngine:
 
         _ = torch  # noqa: F841 — nur Import-Check
 
+    def device_report_lines(self) -> list[str]:
+        """Kurzbericht: welche Anteile des Modells auf GPU vs. CPU liegen."""
+        if self._model is None:
+            return ["Modell nicht geladen."]
+        try:
+            import torch
+        except ImportError:
+            return ["torch nicht verfügbar."]
+
+        lines: list[str] = []
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            alloc = torch.cuda.memory_allocated(0) / (1024**3)
+            lines.append(f"GPU: {name} ({gb:.1f} GB gesamt, {alloc:.1f} GB belegt)")
+        else:
+            lines.append("Keine CUDA-GPU sichtbar — Inferenz nur auf CPU.")
+
+        by_dev: Counter[str] = Counter()
+        for p in self._model.parameters():
+            by_dev[str(p.device)] += p.numel()
+        total = sum(by_dev.values()) or 1
+        for dev, n in by_dev.most_common():
+            lines.append(f"  Parameter auf {dev}: {100.0 * n / total:.1f}%")
+
+        hf_map = getattr(self._model, "hf_device_map", None)
+        if isinstance(hf_map, dict) and hf_map:
+            layer_devs = Counter(str(v) for v in hf_map.values())
+            lines.append(f"  Layer-Verteilung: {dict(layer_devs)}")
+
+        cpuish = sum(
+            n for d, n in by_dev.items() if "cpu" in d.lower() or "meta" in d.lower()
+        )
+        if cpuish > total * 0.05:
+            lines.append(
+                "  Hinweis: Teile des Modells liegen auf CPU (Offload). "
+                "Inferenz nutzt die GPU, ist aber deutlich langsamer — erster Chunk kann "
+                "viele Minuten dauern; tqdm bleibt bis dahin bei 0%."
+            )
+        return lines
+
     @property
     def _flash_attn(self) -> bool:
         return self.flash_attn and _env_bool("OMNI_FLASH_ATTN", True)
@@ -168,26 +212,31 @@ class OmniEngine:
             padding=True,
             use_audio_in_video=use_audio_in_video,
         )
-        inputs = inputs.to(model.device).to(model.dtype)
+        input_device = _input_device(model)
+        inputs = inputs.to(input_device)
+        if hasattr(model, "dtype"):
+            inputs = inputs.to(model.dtype)
         input_len = inputs["input_ids"].shape[1]
 
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": self.max_new_tokens,
+            "use_audio_in_video": use_audio_in_video,
+            "return_audio": False,
+        }
+        label = f"Chunk-Inferenz ({wav_path.name})"
         if self._family == "qwen3":
-            out = model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                use_audio_in_video=use_audio_in_video,
-                return_audio=False,
+            out = _run_with_heartbeat(
+                lambda: model.generate(**inputs, **gen_kwargs),
+                label=label,
             )
             if hasattr(out, "sequences"):
                 gen_ids = out.sequences[:, input_len:]
             else:
                 gen_ids = out[:, input_len:]
         else:
-            out = model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                use_audio_in_video=use_audio_in_video,
-                return_audio=False,
+            out = _run_with_heartbeat(
+                lambda: model.generate(**inputs, **gen_kwargs),
+                label=label,
             )
             gen_ids = out[:, input_len:]
 
@@ -197,6 +246,51 @@ class OmniEngine:
         if not decoded:
             return ""
         return (decoded[0] or "").strip()
+
+
+_T = TypeVar("_T")
+
+
+def _input_device(model: Any):
+    import torch
+
+    if hasattr(model, "device"):
+        return model.device
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _heartbeat_interval_sec() -> float:
+    raw = (os.getenv("OMNI_HEARTBEAT_SEC") or "30").strip()
+    try:
+        v = float(raw)
+    except ValueError:
+        v = 30.0
+    return max(0.0, v)
+
+
+def _run_with_heartbeat(fn: Callable[[], _T], *, label: str) -> _T:
+    interval = _heartbeat_interval_sec()
+    if interval <= 0:
+        return fn()
+
+    stop = threading.Event()
+
+    def _beat() -> None:
+        t0 = time.time()
+        while not stop.wait(interval):
+            elapsed = time.time() - t0
+            print(f"      … {label} läuft ({elapsed:.0f}s) — prüfe GPU: nvidia-smi", flush=True)
+
+    thread = threading.Thread(target=_beat, daemon=True)
+    thread.start()
+    try:
+        return fn()
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
 
 
 def build_engine_from_env() -> OmniEngine:

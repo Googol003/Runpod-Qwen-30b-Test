@@ -155,6 +155,8 @@ def run(
         print(f"      {engine.model_id} (Familie: {engine._family})")
         engine.load()
         print(f"      Modell bereit.")
+        for line in engine.device_report_lines():
+            print(f"      {line}")
 
         chunk_results: List[Dict[str, Any]] = []
         raw_responses: List[Dict[str, Any]] = []
@@ -165,6 +167,11 @@ def run(
         chunk_iter = _progress_iter(chunks, total=total, enabled=use_tqdm)
         for chunk in chunk_iter:
             t0 = time.time()
+            print(
+                f"      → Chunk {chunk.index + 1}/{total} "
+                f"[{chunk.start_sec:.1f}–{chunk.end_sec:.1f}s] Inferenz startet …",
+                flush=True,
+            )
             user_prompt = USER_PROMPT_TEMPLATE.format(
                 source_name=audio.name,
                 chunk_index=chunk.index + 1,
