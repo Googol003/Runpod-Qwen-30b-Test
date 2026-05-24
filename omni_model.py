@@ -60,7 +60,17 @@ def _build_load_kwargs(*, local_only: bool, family: str) -> dict[str, Any]:
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
         )
-        kwargs["device_map"] = device_map or "cuda:0"
+        kwargs["low_cpu_mem_usage"] = True
+        # VRAM-Peak beim Laden: kurz CPU-Staging, danach meist alles auf GPU
+        if torch.cuda.is_available():
+            reserve_gb = float(os.getenv("OMNI_GPU_RESERVE_GB", "4") or "4")
+            total_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            cap_gb = max(8, int(total_gb - reserve_gb))
+            cpu_mem = (os.getenv("OMNI_CPU_MEMORY") or "128GiB").strip()
+            kwargs["max_memory"] = {0: f"{cap_gb}GiB", "cpu": cpu_mem}
+            kwargs["device_map"] = device_map or "auto"
+        else:
+            kwargs["device_map"] = device_map or "cuda:0"
         return kwargs
 
     if no_cpu:
@@ -88,7 +98,11 @@ def _assert_no_cpu_offload_if_requested(model: Any) -> None:
         d = str(p.device).lower()
         if "cpu" in d or "meta" in d:
             cpuish += p.numel()
-    if total and cpuish > total * 0.01:
+    is_quant = getattr(model, "is_loaded_in_4bit", False) or getattr(
+        model, "is_loaded_in_8bit", False
+    )
+    limit = 0.10 if is_quant else 0.01
+    if total and cpuish > total * limit:
         raise OmniModelError(
             f"OMNI_NO_CPU_OFFLOAD=1, aber {100.0 * cpuish / total:.1f}% der Parameter "
             "liegen noch auf CPU/Meta. Unquantisiert braucht 30B-A3B ~60 GB (BF16) — "
@@ -208,6 +222,11 @@ class OmniEngine:
         except ImportError as e:
             raise OmniModelError("torch nicht installiert") from e
 
+        from gpu_memory import free_gpu_memory
+
+        for line in free_gpu_memory():
+            print(f"      {line}")
+
         attn = "flash_attention_2" if self._flash_attn else None
         model_source, local_only = _resolve_model_source(self.model_id)
         load_kw = _build_load_kwargs(local_only=local_only, family=self._family)
@@ -255,6 +274,9 @@ class OmniEngine:
                 model_source, local_files_only=local_only
             )
 
+        from gpu_memory import free_gpu_memory
+
+        free_gpu_memory()
         _assert_no_cpu_offload_if_requested(self._model)
         _ = torch  # noqa: F841
 

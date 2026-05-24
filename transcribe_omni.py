@@ -22,6 +22,7 @@ from audio_chunks import (
 )
 from export_results import write_outputs
 from json_util import parse_json_response
+from gpu_memory import clear_gpu_on_start, setup_cuda_allocator
 from omni_model import (
     OmniModelError,
     apply_runpod_defaults,
@@ -133,6 +134,7 @@ def _load_dotenv() -> None:
 
 
 def _bootstrap_env() -> None:
+    setup_cuda_allocator()
     _load_dotenv()
     apply_runpod_defaults()
 
@@ -174,6 +176,10 @@ def run(
     if not audio.is_file():
         print(f"Audio nicht gefunden: {audio}", file=sys.stderr)
         return 2
+
+    print("[0] GPU-Speicher freigeben …")
+    for line in clear_gpu_on_start():
+        print(f"      {line}")
 
     work_dir = make_work_dir()
     try:
@@ -352,8 +358,10 @@ def main() -> None:
     )
     args = ap.parse_args()
     if args.check:
-        engine = build_engine_from_env()
         print("=== Modell-Check (Hugging Face Qwen-Omni) ===")
+        for line in clear_gpu_on_start():
+            print(f"  {line}")
+        engine = build_engine_from_env()
         for line in load_plan_lines(engine.model_id):
             print(f"  {line}")
         if args.check_load:
