@@ -98,6 +98,27 @@ OMNI_CHUNK_SEC=45 python transcribe_omni.py -a audio.mp3 -o out
 python transcribe_omni.py -a audio.mp3 -o out --keep-work
 ```
 
-## VRAM
+## VRAM & RTX 5090 (32 GB)
 
-30B MoE braucht eine **große** RunPod-GPU (z. B. A100 80GB). Bei OOM: kleineres Modell oder kürzere `OMNI_CHUNK_SEC`.
+**„30B-A3B“** heißt: **~3B Parameter aktiv pro Token** (MoE), aber **alle ~30B Gewichte** müssen geladen werden — nicht nur 3B.
+
+| Format | Gewichte ca. | 32 GB GPU (5090) |
+|--------|----------------|------------------|
+| BF16/FP16 (`dtype=auto`, Standard) | **~60 GB** | Passt **nicht** → `device_map=auto` offloadet still auf **CPU** |
+| 4-bit (`OMNI_LOAD_IN_4BIT=1`) | **~17–20 GB** | Passt **auf GPU** (empfohlen für 5090) |
+| 8-bit | **~30 GB** | Knapp; oft noch Offload/KV-Cache |
+
+### Nur GPU, kein CPU-Offload (5090 + 30B)
+
+```bash
+pip install bitsandbytes
+export OMNI_FLASH_ATTN=0
+export OMNI_LOAD_IN_4BIT=1
+export OMNI_NO_CPU_OFFLOAD=1
+export OMNI_DEVICE_MAP=cuda:0
+python transcribe_omni.py --audio TestAudio.mp3 --output-dir output
+```
+
+Ohne 4-bit schlägt `OMNI_NO_CPU_OFFLOAD=1` nach dem Laden mit klarer Meldung fehl (statt langsam auf CPU weiterzulaufen).
+
+7B unquantisiert passt auf 32 GB ohne Quantisierung.
