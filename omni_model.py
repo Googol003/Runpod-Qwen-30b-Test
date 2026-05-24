@@ -396,14 +396,30 @@ class OmniEngine:
             return out
 
         out = _run_with_heartbeat(_gen, label=wav_path.name)
-        if hasattr(out, "sequences"):
-            gen_ids = out.sequences[:, input_len:]
-        else:
-            gen_ids = out[:, input_len:]
+        gen_ids = _generation_token_ids(out, input_len)
         decoded = processor.batch_decode(
             gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
         return (decoded[0] or "").strip() if decoded else ""
+
+
+def _generation_token_ids(out: Any, input_len: int) -> Any:
+    """
+    Qwen3-Omni generate() liefert je nach Config:
+    - Tensor
+    - (text_ids, audio) Tupel
+    - GenerateOutput mit .sequences
+    """
+    if hasattr(out, "sequences"):
+        return out.sequences[:, input_len:]
+    if isinstance(out, tuple):
+        text_ids = out[0]
+        if hasattr(text_ids, "sequences"):
+            return text_ids.sequences[:, input_len:]
+        return text_ids[:, input_len:]
+    if isinstance(out, list) and out:
+        return _generation_token_ids(out[0], input_len)
+    return out[:, input_len:]
 
 
 def _run_with_heartbeat(fn: Callable[[], _T], *, label: str) -> _T:
