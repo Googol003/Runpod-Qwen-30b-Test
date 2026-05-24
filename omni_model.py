@@ -400,7 +400,14 @@ class OmniEngine:
         decoded = processor.batch_decode(
             gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
-        return (decoded[0] or "").strip() if decoded else ""
+        text = (decoded[0] or "").strip() if decoded else ""
+        del inputs, out, gen_ids, decoded, audios, images, videos
+        if _env_bool("OMNI_EMPTY_CUDA", True):
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        return text
 
 
 def _generation_token_ids(out: Any, input_len: int) -> Any:
